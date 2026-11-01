@@ -670,17 +670,24 @@ export async function registerNodejs(): Promise<void> {
     try {
       const [
         { startGrokBotCleanupSweeper },
+        { isConnectionUnavailableToAuxiliaryActivity },
         { getTransport },
         { getProviderConnectionById },
         { getAccessToken, updateProviderCredentials },
       ] = await Promise.all([
         import("@omniroute/open-sse/executors/grok-bot-cleanup-sweeper.ts"),
+        import("@/lib/exclusiveLeaseIsolation"),
         import("@omniroute/open-sse/executors/grok-bot.ts"),
         import("@/lib/db/providers"),
         import("@/sse/services/tokenRefresh"),
       ]);
       startGrokBotCleanupSweeper({
         resolveConnection: async (connectionId: string) => {
+          // This queue belongs to a previous request, not the current lease
+          // owner. Throw to defer: null means a deleted row and drops the item.
+          if (await isConnectionUnavailableToAuxiliaryActivity(connectionId)) {
+            throw new Error("Grok Bot cleanup deferred for an active exclusive lease");
+          }
           const connection = await getProviderConnectionById(connectionId);
           if (!connection || connection.provider !== "grok-bot") return null;
           const token = connection.refreshToken;
