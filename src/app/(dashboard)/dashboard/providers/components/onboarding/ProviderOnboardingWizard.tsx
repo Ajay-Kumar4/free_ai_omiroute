@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import Icon from "@/shared/components/Icon";
+
+import { useEffect, useId, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -127,9 +129,10 @@ function StepPill({ active, done, label }: { active: boolean; done: boolean; lab
             : "border-border bg-bg-subtle text-text-muted"
       }`}
     >
-      <span className="material-symbols-outlined text-[16px]">
-        {done ? "check" : active ? "radio_button_checked" : "radio_button_unchecked"}
-      </span>
+      <Icon
+        name={done ? "check" : active ? "radio_button_checked" : "radio_button_unchecked"}
+        size={16}
+      />
       {label}
     </div>
   );
@@ -233,9 +236,7 @@ function ResultSummary({
                   : "bg-primary/10 text-primary"
             }`}
           >
-            <span className="material-symbols-outlined text-[28px]">
-              {valid ? "check_circle" : failed ? "error" : "dns"}
-            </span>
+            <Icon name={valid ? "check_circle" : failed ? "error" : "dns"} size={28} />
           </div>
           <div>
             <h2 className="text-xl font-semibold text-text-main">
@@ -335,6 +336,7 @@ export default function ProviderOnboardingWizard() {
   const [step, setStep] = useState<WizardStep>("type");
   const [query, setQuery] = useState("");
   const [selectedProvider, setSelectedProvider] = useState<WizardProviderOption | null>(null);
+  const providerListHeadingId = useId();
   const [apiKeyForm, setApiKeyForm] = useState<ApiKeyFormState>(EMPTY_API_KEY_FORM);
   const [customForm, setCustomForm] = useState<CustomFormState>(DEFAULT_CUSTOM_FORM);
   const [status, setStatus] = useState("");
@@ -635,8 +637,8 @@ export default function ProviderOnboardingWizard() {
                 onClick={() => resetProviderSelection(item.id)}
                 className="rounded-xl border border-border bg-bg-card p-5 text-left transition-colors hover:border-primary/50 hover:bg-bg-subtle"
               >
-                <span className="material-symbols-outlined text-[32px] text-primary">
-                  {item.icon}
+                <span aria-hidden className="text-primary">
+                  <Icon name={item.icon} size={32} />
                 </span>
                 <h2 className="mt-3 text-lg font-semibold text-text-main">{item.title}</h2>
                 <p className="mt-2 text-sm text-text-muted">{item.text}</p>
@@ -651,7 +653,7 @@ export default function ProviderOnboardingWizard() {
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
               <div>
-                <h2 className="text-xl font-semibold text-text-main">
+                <h2 id={providerListHeadingId} className="text-xl font-semibold text-text-main">
                   {kind === "oauth"
                     ? text("onboardingChooseOAuthProvider", "Choose an OAuth provider")
                     : text("onboardingChooseApiKeyProvider", "Choose an API-key provider")}
@@ -673,7 +675,11 @@ export default function ProviderOnboardingWizard() {
               placeholder={text("onboardingSearchProviders", "Search providers…")}
               icon="search"
             />
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <div
+              role="group"
+              aria-labelledby={providerListHeadingId}
+              className="grid gap-3 md:grid-cols-2 xl:grid-cols-3"
+            >
               {filteredOptions.map((option) => (
                 <ProviderOptionCard
                   key={option.id}
