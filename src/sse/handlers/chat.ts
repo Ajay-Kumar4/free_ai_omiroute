@@ -72,6 +72,12 @@ import {
 import { getPassthroughProviders } from "@omniroute/open-sse/config/providerRegistry.ts";
 import * as log from "../utils/logger";
 import { checkAndRefreshToken } from "../services/tokenRefresh";
+import {
+  isCodexResponseCurrent,
+  runWithCodexResponseFence,
+  STALE_CODEX_OPERATION_CODE,
+  StaleCodexOperationError,
+} from "@/lib/db/codexConnectionFences";
 import { createHookContext, runHooks, initPreRequestRegistry } from "@/lib/middleware/registry";
 import { rejectPeerRequest } from "@/shared/resilience/peerRouting";
 import { isRuntimeProviderRetirementError } from "@/shared/constants/providerRetirement";
@@ -1751,6 +1757,9 @@ async function handleSingleModelChat(
   // original early-EOF 502 so an exhausted sibling pool surfaces it verbatim (combo detection).
   let earlyEofOriginal: Response | null = null;
   const sameAccountTransportRetries = new Map<string, number>();
+  // A Codex snapshot that went stale before dispatch reached no upstream, so it is not an account
+  // failure: reselect the current row once instead of surfacing the fence to the client.
+  let staleCodexReselected = false;
   const occupancySessionKey =
     runtimeOptions.sessionAffinityKey ?? runtimeOptions.sessionId ?? `request:${randomUUID()}`;
   let initialPreselectedCredentials = runtimeOptions.preselectedCredentials;
@@ -2074,7 +2083,10 @@ async function handleSingleModelChat(
         );
       } catch (error) {
         releaseOAuthSession();
-        throw error;
+        if (!(error instanceof StaleCodexOperationError)) throw error;
+        if (staleCodexReselected) return errorResponse(error.status, error.message);
+        staleCodexReselected = true;
+        continue;
       }
       const museBindFailure =
         museOwner &&
@@ -2210,6 +2222,11 @@ async function handleSingleModelChat(
           )
         );
       else agyLease.release(leaseId);
+      if (result.errorCode === STALE_CODEX_OPERATION_CODE) {
+        if (staleCodexReselected) return result.response;
+        staleCodexReselected = true;
+        continue;
+      }
       const proxyLatency = Date.now() - proxyStartTime;
       const providerAlias = PROVIDER_ID_TO_ALIAS[provider] || provider;
       const effectiveTargetFormat =
@@ -2236,8 +2253,10 @@ async function handleSingleModelChat(
       });
 
       if (result.success) {
-        clearModelLock(provider, credentials.connectionId, model);
-        markQuotaHealthy(credentials.connectionId);
+        if (isCodexResponseCurrent(result.response, true)) {
+          clearModelLock(provider, credentials.connectionId, model);
+          markQuotaHealthy(credentials.connectionId);
+        }
         // Acquired probes were settled inside execute(); other successes settle here or in combo.
         if (
           !wasProviderProbe &&
@@ -2747,26 +2766,28 @@ async function handleSingleModelChat(
 
       const { shouldFallback, cooldownMs } = skipConnectionDisable
         ? { shouldFallback: false, cooldownMs: 0 }
-        : await markAccountUnavailable(
-            credentials.connectionId,
-            result.status,
-            errorStr,
-            provider,
-            model,
-            providerProfile,
-            buildExhaustionOptions(runtimeOptions.correlationId ?? null, {
-              persistUnavailableState: !(
-                isCombo &&
-                result.status === 429 &&
-                (failureKind === "rate_limit" || failureKind === "transient")
-              ),
-              isCombo,
-              headers: result.response.headers,
-              isAvalancheRisk: avalancheRisk?.isAvalancheRisk ?? false,
-              avalancheCooldownMs: avalancheRisk?.suggestedCooldownMs,
-              suppressFallback: avalancheRisk?.shouldSuppressFallback ?? false,
-              structuredError: { code: result.errorCode, type: result.errorType },
-            })
+        : await runWithCodexResponseFence(result.response, () =>
+            markAccountUnavailable(
+              credentials.connectionId,
+              result.status,
+              errorStr,
+              provider,
+              model,
+              providerProfile,
+              buildExhaustionOptions(runtimeOptions.correlationId ?? null, {
+                persistUnavailableState: !(
+                  isCombo &&
+                  result.status === 429 &&
+                  (failureKind === "rate_limit" || failureKind === "transient")
+                ),
+                isCombo,
+                headers: result.response.headers,
+                isAvalancheRisk: avalancheRisk?.isAvalancheRisk ?? false,
+                avalancheCooldownMs: avalancheRisk?.suggestedCooldownMs,
+                suppressFallback: avalancheRisk?.shouldSuppressFallback ?? false,
+                structuredError: { code: result.errorCode, type: result.errorType },
+              })
+            )
           );
 
       if (avalancheRisk?.shouldSuppressFallback) {
