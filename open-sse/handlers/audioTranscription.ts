@@ -26,6 +26,10 @@ import {
 import { buildAuthHeaders } from "../config/registryUtils.ts";
 import { kieExecutor } from "../executors/kie.ts";
 import { vertexTranscribe } from "../executors/vertexMedia.ts";
+import {
+  GEMINI_LIVE_MAX_INPUT_BYTES,
+  geminiLiveTranscribe,
+} from "../executors/geminiLiveTranscribe.ts";
 import { errorResponse } from "../utils/error.ts";
 import { hasUnsafeModelIdSyntax } from "../utils/modelIdSafety.ts";
 import { isJsonObject } from "../utils/kieTask.ts";
@@ -887,6 +891,43 @@ async function handleSpeechmaticsTranscription(providerConfig, file, modelId, to
   return pollSpeechmaticsJob(`${baseUrl}/${jobId}`, authHeaders);
 }
 
+function optionalFormString(formData: FormData, key: string): string | undefined {
+  const value = formData.get(key);
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * Gemini Live (BidiGenerateContent WebSocket) file-mode transcription.
+ * Rejects oversized uploads before buffering them a second time.
+ */
+async function handleGeminiLiveTranscription(
+  providerConfig: AudioProvider,
+  file: Blob,
+  modelId: string | null,
+  credentials: TranscriptionCredentials | null | undefined,
+  formData: FormData
+): Promise<Response> {
+  if (file.size > GEMINI_LIVE_MAX_INPUT_BYTES) {
+    return errorResponse(413, "Audio file is too large for Gemini Live transcription");
+  }
+  try {
+    const text = await geminiLiveTranscribe(credentials ?? {}, {
+      model: modelId as string,
+      audioBuffer: Buffer.from(await file.arrayBuffer()),
+      prompt: optionalFormString(formData, "prompt"),
+      language: optionalFormString(formData, "language"),
+      baseUrl: providerConfig.baseUrl,
+    });
+    return Response.json({ text }, { headers: { ...CORS_HEADERS } });
+  } catch (err) {
+    const error = err as { message?: string; status?: number };
+    return errorResponse(
+      typeof error?.status === "number" ? error.status : 500,
+      `Gemini Live transcription failed: ${error?.message || "unknown error"}`
+    );
+  }
+}
+
 function resolveTranscriptionToken(
   providerConfig: AudioProvider,
   credentials?: TranscriptionCredentials | null
@@ -944,7 +985,7 @@ export async function handleAudioTranscription({
   if (!providerConfig) {
     return errorResponse(
       400,
-      `No transcription provider found for model "${model}". Available: openai, openrouter, groq, deepgram, assemblyai, nvidia, huggingface, qwen, gladia, rev-ai, speechmatics`
+      `No transcription provider found for model "${model}". Available: openai, openrouter, groq, deepgram, assemblyai, nvidia, huggingface, qwen, gladia, rev-ai, speechmatics, gemini`
     );
   }
 
@@ -964,6 +1005,10 @@ export async function handleAudioTranscription({
   const file = resolvedFile.file;
 
   // Route to provider-specific handler
+  if (providerConfig.format === "gemini-live") {
+    return handleGeminiLiveTranscription(providerConfig, file, modelId, credentials, formData);
+  }
+
   if (providerConfig.format === "grok-stt") {
     return handleGrokTranscription(providerConfig, file, modelId, credentials, formData);
   }
